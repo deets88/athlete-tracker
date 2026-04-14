@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { csvParse } from 'd3-dsv';
+import * as XLSX from 'xlsx';
 import './App.css';
 import { db, isFirebaseReady } from './firebase';
 import {
@@ -62,6 +63,7 @@ const mapRosterRow = (row, sourceFile) => {
   const gender = getValue(row, ['gender', 'sex']);
   const email = getValue(row, ['studentemailaddress', 'email', 'studentemail']);
   const grade = getValue(row, ['yeargrade', 'grade', 'year']);
+  const birthdate = getValue(row, ['birthdate', 'dateofbirth', 'dob', 'studentbirthdate']);
   const studentNumber = extractStudentNumber({ row, email });
 
   const hasUsefulData =
@@ -79,15 +81,33 @@ const mapRosterRow = (row, sourceFile) => {
     gender,
     email,
     grade,
+    birthdate,
     studentNumber,
     athleteKey: createAthleteKey({ studentNumber, firstName, lastName, email }),
     sourceFile,
   };
 };
 
-const parseCsvFile = async (file) => {
-  const text = await file.text();
-  return csvParse(text);
+const parseSpreadsheetFile = async (file) => {
+  const lowerName = (file.name || '').toLowerCase();
+  const isExcelFile = lowerName.endsWith('.xlsx') || lowerName.endsWith('.xls');
+
+  if (!isExcelFile) {
+    const text = await file.text();
+    return csvParse(text);
+  }
+
+  const buffer = await file.arrayBuffer();
+  const workbook = XLSX.read(buffer, { type: 'array' });
+  const firstSheetName = workbook.SheetNames[0];
+
+  if (!firstSheetName) {
+    return [];
+  }
+
+  return XLSX.utils.sheet_to_json(workbook.Sheets[firstSheetName], {
+    defval: '',
+  });
 };
 
 const getErrorMessage = (error) => {
@@ -96,6 +116,28 @@ const getErrorMessage = (error) => {
   if (error.code) return `${error.code}: ${error.message}`;
   return error.message || 'Unknown error.';
 };
+
+const hydrateAthlete = (athleteKey, data) => ({
+  athleteKey,
+  studentNumber: data.studentNumber || '',
+  firstName: data.firstName || '',
+  lastName: data.lastName || '',
+  email: data.email || '',
+  grade: data.grade || '',
+  gender: data.gender || '',
+  birthdate: data.birthdate || '',
+  teams: Array.isArray(data.teams) ? data.teams : [],
+  team: Array.isArray(data.teams) ? data.teams[0] : '',
+  sourceFile: Array.isArray(data.sourceFiles) ? data.sourceFiles[0] : '',
+});
+
+const normalizeSearchValue = (value = '') => `${value}`.trim().toLowerCase();
+
+const splitCommaTerms = (value = '') =>
+  value
+    .split(',')
+    .map((term) => normalizeSearchValue(term))
+    .filter(Boolean);
 
 function App() {
   const [allAthletes, setAllAthletes] = useState([]);
@@ -108,6 +150,8 @@ function App() {
   const [isUploading, setIsUploading] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [filterTeam, setFilterTeam] = useState('');
+  const [filterGrade, setFilterGrade] = useState('');
+  const [filterBirthdate, setFilterBirthdate] = useState('');
 
   const canUpload = !isUploading;
 
@@ -121,21 +165,7 @@ function App() {
     const loadAthletesFromFirebase = async () => {
       try {
         const snapshot = await getDocs(collection(db, 'athletes'));
-        const athletes = snapshot.docs.map((docSnap) => {
-          const data = docSnap.data();
-          return {
-            athleteKey: docSnap.id,
-            studentNumber: data.studentNumber || '',
-            firstName: data.firstName || '',
-            lastName: data.lastName || '',
-            email: data.email || '',
-            grade: data.grade || '',
-            gender: data.gender || '',
-            teams: Array.isArray(data.teams) ? data.teams : [],
-            team: Array.isArray(data.teams) ? data.teams[0] : '',
-            sourceFile: Array.isArray(data.sourceFiles) ? data.sourceFiles[0] : '',
-          };
-        });
+        const athletes = snapshot.docs.map((docSnap) => hydrateAthlete(docSnap.id, docSnap.data()));
         setAllAthletes(athletes);
         setUploadStatus(`Loaded ${athletes.length} athletes from Firebase.`);
       } catch (error) {
@@ -150,19 +180,33 @@ function App() {
 
   // Filter and search rows
   const filteredRows = useMemo(() => {
+    const queryTerms = splitCommaTerms(searchQuery);
+    const hasSearchTerms = queryTerms.length > 0;
+    const normalizedBirthdateFilter = normalizeSearchValue(filterBirthdate);
+
     return allAthletes.filter((row) => {
+      const searchableValues = [
+        row.firstName,
+        row.lastName,
+        row.studentNumber,
+        row.email,
+        `${row.firstName || ''} ${row.lastName || ''}`,
+      ]
+        .map((value) => normalizeSearchValue(value))
+        .filter(Boolean);
+
       const matchesSearch =
-        !searchQuery ||
-        row.firstName.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        row.lastName.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        row.studentNumber.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        row.email.toLowerCase().includes(searchQuery.toLowerCase());
+        !hasSearchTerms ||
+        queryTerms.some((term) => searchableValues.some((value) => value.includes(term)));
 
       const matchesTeamFilter = !filterTeam || row.teams.includes(filterTeam);
+      const matchesGradeFilter = !filterGrade || normalizeSearchValue(row.grade) === normalizeSearchValue(filterGrade);
+      const matchesBirthdateFilter =
+        !normalizedBirthdateFilter || normalizeSearchValue(row.birthdate).includes(normalizedBirthdateFilter);
 
-      return matchesSearch && matchesTeamFilter;
+      return matchesSearch && matchesTeamFilter && matchesGradeFilter && matchesBirthdateFilter;
     });
-  }, [allAthletes, searchQuery, filterTeam]);
+  }, [allAthletes, searchQuery, filterTeam, filterGrade, filterBirthdate]);
 
   // Get all unique teams for filter dropdown
   const uniqueTeams = useMemo(() => {
@@ -171,6 +215,16 @@ function App() {
       athlete.teams.forEach((team) => teams.add(team));
     });
     return Array.from(teams).sort();
+  }, [allAthletes]);
+
+  const uniqueGrades = useMemo(() => {
+    const grades = new Set();
+    allAthletes.forEach((athlete) => {
+      if (athlete.grade) {
+        grades.add(athlete.grade);
+      }
+    });
+    return Array.from(grades).sort();
   }, [allAthletes]);
 
   const displaySummary = useMemo(() => {
@@ -202,6 +256,7 @@ function App() {
         gender: row.gender || null,
         email: row.email || null,
         grade: row.grade || null,
+        birthdate: row.birthdate || null,
         sourceFiles: arrayUnion(fileName),
         uploadIds: arrayUnion(uploadRef.id),
         updatedAt: serverTimestamp(),
@@ -237,7 +292,7 @@ function App() {
 
     try {
       for (const file of files) {
-        const rows = await parseCsvFile(file);
+        const rows = await parseSpreadsheetFile(file);
 
         const mappedRows = rows
           .map((row) => mapRosterRow(row, file.name))
@@ -257,30 +312,23 @@ function App() {
       if (!allMappedRows.length) {
         setUploadStatus('No valid athlete rows were found in the selected files.');
       } else if (!isFirebaseReady) {
+        setAllAthletes(allMappedRows);
+        setSearchQuery('');
+        setFilterTeam('');
+        setFilterGrade('');
+        setFilterBirthdate('');
         setUploadStatus(
           `Parsed ${allMappedRows.length} rows from ${files.length} file(s). Configure Firebase .env to enable saving.`
         );
       } else {
         // Reload athletes from Firebase to show newly uploaded data
         const snapshot = await getDocs(collection(db, 'athletes'));
-        const athletes = snapshot.docs.map((docSnap) => {
-          const data = docSnap.data();
-          return {
-            athleteKey: docSnap.id,
-            studentNumber: data.studentNumber || '',
-            firstName: data.firstName || '',
-            lastName: data.lastName || '',
-            email: data.email || '',
-            grade: data.grade || '',
-            gender: data.gender || '',
-            teams: Array.isArray(data.teams) ? data.teams : [],
-            team: Array.isArray(data.teams) ? data.teams[0] : '',
-            sourceFile: Array.isArray(data.sourceFiles) ? data.sourceFiles[0] : '',
-          };
-        });
+        const athletes = snapshot.docs.map((docSnap) => hydrateAthlete(docSnap.id, docSnap.data()));
         setAllAthletes(athletes);
         setSearchQuery('');
         setFilterTeam('');
+        setFilterGrade('');
+        setFilterBirthdate('');
         setUploadStatus(
           `Upload complete. Saved ${allMappedRows.length} rows from ${files.length} file(s) to Firebase.`
         );
@@ -296,6 +344,10 @@ function App() {
   return (
     <div className="page-shell">
       <main className="tracker-card">
+          <div className="dragon-badge" aria-hidden="true">
+            <span className="dragon-icon">GO DRAGONS</span>
+            <span className="dragon-glyph">🐉</span>
+          </div>
         <h1>Athlete tracker</h1>
 
         <section className="controls-row">
@@ -303,28 +355,49 @@ function App() {
             <input
               type="text"
               className="search-input"
-              placeholder="Search bar"
+              placeholder="Search athlete (use commas for multiple names)"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
             />
-            <select
-              className="filter-button"
-              value={filterTeam}
-              onChange={(e) => setFilterTeam(e.target.value)}
-            >
-              <option value="">filter by team</option>
-              {uniqueTeams.map((team) => (
-                <option key={team} value={team}>
-                  {team}
-                </option>
-              ))}
-            </select>
+            <div className="filter-row">
+              <select
+                className="filter-button"
+                value={filterTeam}
+                onChange={(e) => setFilterTeam(e.target.value)}
+              >
+                <option value="">Filter by team</option>
+                {uniqueTeams.map((team) => (
+                  <option key={team} value={team}>
+                    {team}
+                  </option>
+                ))}
+              </select>
+              <select
+                className="filter-button"
+                value={filterGrade}
+                onChange={(e) => setFilterGrade(e.target.value)}
+              >
+                <option value="">Filter by grade</option>
+                {uniqueGrades.map((grade) => (
+                  <option key={grade} value={grade}>
+                    {grade}
+                  </option>
+                ))}
+              </select>
+              <input
+                type="text"
+                className="birthdate-input"
+                placeholder="Search birthdate"
+                value={filterBirthdate}
+                onChange={(e) => setFilterBirthdate(e.target.value)}
+              />
+            </div>
           </div>
 
           <label className={`upload-box ${!canUpload ? 'disabled' : ''}`}>
             <input
               type="file"
-              accept=".csv,text/csv"
+              accept=".csv,text/csv,.xlsx,.xls,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
               multiple
               onChange={handleFilesUpload}
               disabled={!canUpload}
@@ -350,7 +423,7 @@ function App() {
               {isLoadingFirebase
                 ? 'Loading athletes...'
                 : allAthletes.length === 0
-                ? 'Upload one or more CSV files to preview parsed data.'
+                  ? 'Upload one or more spreadsheet files to preview parsed data.'
                 : 'No athletes match your search or filter.'}
             </p>
           ) : (
@@ -362,6 +435,7 @@ function App() {
                     <th>First Name</th>
                     <th>Last Name</th>
                     <th>Email</th>
+                    <th>Birthdate</th>
                     <th>Grade</th>
                     <th>Team</th>
                     <th>Source File</th>
@@ -374,6 +448,7 @@ function App() {
                       <td>{row.firstName}</td>
                       <td>{row.lastName}</td>
                       <td>{row.email}</td>
+                      <td>{row.birthdate}</td>
                       <td>{row.grade}</td>
                       <td>{row.team}</td>
                       <td>{row.sourceFile}</td>
