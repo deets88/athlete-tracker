@@ -139,6 +139,22 @@ const splitCommaTerms = (value = '') =>
     .map((term) => normalizeSearchValue(term))
     .filter(Boolean);
 
+const tableColumns = [
+  { id: 'studentNumber', label: 'Student Number' },
+  { id: 'firstName', label: 'First Name' },
+  { id: 'lastName', label: 'Last Name' },
+  { id: 'email', label: 'Email' },
+  { id: 'birthdate', label: 'Birthdate' },
+  { id: 'grade', label: 'Grade' },
+  { id: 'team', label: 'Team' },
+  { id: 'sourceFile', label: 'Source File' },
+];
+
+const defaultVisibleColumns = tableColumns.reduce((acc, column) => {
+  acc[column.id] = true;
+  return acc;
+}, {});
+
 function App() {
   const [allAthletes, setAllAthletes] = useState([]);
   const [isLoadingFirebase, setIsLoadingFirebase] = useState(isFirebaseReady);
@@ -152,6 +168,7 @@ function App() {
   const [filterTeam, setFilterTeam] = useState('');
   const [filterGrade, setFilterGrade] = useState('');
   const [filterBirthdate, setFilterBirthdate] = useState('');
+  const [visibleColumns, setVisibleColumns] = useState(defaultVisibleColumns);
 
   const canUpload = !isUploading;
 
@@ -237,6 +254,11 @@ function App() {
       rowCount: filteredRows.length,
     };
   }, [filteredRows]);
+
+  const renderedColumns = useMemo(
+    () => tableColumns.filter((column) => visibleColumns[column.id]),
+    [visibleColumns]
+  );
 
   const persistRowsToFirebase = async (mappedRows, fileName) => {
     const uploadRef = await addDoc(collection(db, 'uploads'), {
@@ -341,6 +363,13 @@ function App() {
     }
   };
 
+  const handleToggleColumn = (columnId) => {
+    setVisibleColumns((current) => ({
+      ...current,
+      [columnId]: !current[columnId],
+    }));
+  };
+
   return (
     <div className="page-shell">
       <main className="tracker-card">
@@ -418,6 +447,22 @@ function App() {
             </div>
           </div>
 
+          <div className="column-visibility-row">
+            <span className="column-visibility-label">Show columns:</span>
+            <div className="column-visibility-options">
+              {tableColumns.map((column) => (
+                <label key={column.id} className="column-toggle">
+                  <input
+                    type="checkbox"
+                    checked={visibleColumns[column.id]}
+                    onChange={() => handleToggleColumn(column.id)}
+                  />
+                  <span>{column.label}</span>
+                </label>
+              ))}
+            </div>
+          </div>
+
           {filteredRows.length === 0 ? (
             <p className="empty-state">
               {isLoadingFirebase
@@ -431,27 +476,17 @@ function App() {
               <table>
                 <thead>
                   <tr>
-                    <th>Student Number</th>
-                    <th>First Name</th>
-                    <th>Last Name</th>
-                    <th>Email</th>
-                    <th>Birthdate</th>
-                    <th>Grade</th>
-                    <th>Team</th>
-                    <th>Source File</th>
+                    {renderedColumns.map((column) => (
+                      <th key={column.id}>{column.label}</th>
+                    ))}
                   </tr>
                 </thead>
                 <tbody>
                   {filteredRows.slice(0, 120).map((row, index) => (
                     <tr key={`${row.athleteKey}-${row.team}-${index}`}>
-                      <td>{row.studentNumber}</td>
-                      <td>{row.firstName}</td>
-                      <td>{row.lastName}</td>
-                      <td>{row.email}</td>
-                      <td>{row.birthdate}</td>
-                      <td>{row.grade}</td>
-                      <td>{row.team}</td>
-                      <td>{row.sourceFile}</td>
+                      {renderedColumns.map((column) => (
+                        <td key={`${row.athleteKey}-${column.id}`}>{row[column.id]}</td>
+                      ))}
                     </tr>
                   ))}
                 </tbody>
