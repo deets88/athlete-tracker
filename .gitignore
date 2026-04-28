@@ -24,3 +24,6 @@ yarn-debug.log*
 yarn-error.log*
 
 firebase.js
+
+serviceAccountKey.json
+*-firebase-adminsdk-*.json

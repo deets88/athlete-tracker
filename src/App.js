@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
-import { csvParse } from 'd3-dsv';
 import * as XLSX from 'xlsx';
 import './App.css';
-import { db, isFirebaseReady } from './firebase';
+import AuthButton from './components/AuthButton';
+import { auth, db, isFirebaseReady } from './firebase';
 import {
   addDoc,
   arrayUnion,
@@ -12,9 +12,67 @@ import {
   serverTimestamp,
   setDoc,
 } from 'firebase/firestore';
+import { onAuthStateChanged, signOut } from 'firebase/auth';
 
 const normalizeHeader = (value = '') =>
   value.toLowerCase().replace(/[^a-z0-9]/g, '');
+
+const parseCsvText = (text = '') => {
+  const lines = `${text}`
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    .split('\n')
+    .filter((line, index, allLines) => line.trim() || index < allLines.length - 1);
+
+  if (!lines.length) {
+    return [];
+  }
+
+  const parseLine = (line) => {
+    const values = [];
+    let currentValue = '';
+    let inQuotes = false;
+
+    for (let index = 0; index < line.length; index += 1) {
+      const character = line[index];
+      const nextCharacter = line[index + 1];
+
+      if (character === '"') {
+        if (inQuotes && nextCharacter === '"') {
+          currentValue += '"';
+          index += 1;
+        } else {
+          inQuotes = !inQuotes;
+        }
+        continue;
+      }
+
+      if (character === ',' && !inQuotes) {
+        values.push(currentValue);
+        currentValue = '';
+        continue;
+      }
+
+      currentValue += character;
+    }
+
+    values.push(currentValue);
+    return values.map((value) => value.trim());
+  };
+
+  const headers = parseLine(lines[0]);
+
+  return lines.slice(1).map((line) => {
+    const values = parseLine(line);
+
+    return headers.reduce((row, header, index) => {
+      if (header) {
+        row[header] = values[index] ?? '';
+      }
+      return row;
+    }, {});
+  });
+};
 
 const getValue = (row, headerCandidates) => {
   const rowEntries = Object.entries(row || {});
@@ -94,7 +152,7 @@ const parseSpreadsheetFile = async (file) => {
 
   if (!isExcelFile) {
     const text = await file.text();
-    return csvParse(text);
+    return parseCsvText(text);
   }
 
   const buffer = await file.arrayBuffer();
@@ -155,8 +213,14 @@ const defaultVisibleColumns = tableColumns.reduce((acc, column) => {
   return acc;
 }, {});
 
+const isAllowedHkisEmail = (email = '') => {
+  const [, domain = ''] = `${email}`.toLowerCase().split('@');
+  return domain === 'hkis.edu.hk' || domain.endsWith('.hkis.edu.hk');
+};
+
 function App() {
   const [allAthletes, setAllAthletes] = useState([]);
+  const [user, setUser] = useState(null);
   const [isLoadingFirebase, setIsLoadingFirebase] = useState(isFirebaseReady);
   const [uploadStatus, setUploadStatus] = useState(
     isFirebaseReady
@@ -170,30 +234,76 @@ function App() {
   const [filterBirthdate, setFilterBirthdate] = useState('');
   const [visibleColumns, setVisibleColumns] = useState(defaultVisibleColumns);
 
-  const canUpload = !isUploading;
+  const canUpload = !isUploading && !!user;
 
-  // Fetch all athletes from Firestore on mount
+  useEffect(() => {
+    if (!auth) {
+      setUser(null);
+      return undefined;
+    }
+
+    const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
+      if (currentUser && !isAllowedHkisEmail(currentUser.email)) {
+        setUser(null);
+        setAllAthletes([]);
+        setUploadStatus('Access denied. Please sign in with an @hkis.edu.hk account.');
+        await signOut(auth);
+        return;
+      }
+
+      setUser(currentUser);
+
+      if (!currentUser && isFirebaseReady) {
+        setUploadStatus('Sign in with your HKIS Google account to load athlete data.');
+      }
+    });
+
+    return () => unsubscribe();
+  }, []);
+
+  // Load athletes whenever auth state changes
   useEffect(() => {
     if (!isFirebaseReady) {
       setIsLoadingFirebase(false);
       return;
     }
 
+    if (!user) {
+      setAllAthletes([]);
+      setIsLoadingFirebase(false);
+      setSearchQuery('');
+      setFilterTeam('');
+      setFilterGrade('');
+      setFilterBirthdate('');
+      return;
+    }
+
+    let cancelled = false;
+    setIsLoadingFirebase(true);
+    setUploadStatus('Loading athletes from Firebase...');
+
     const loadAthletesFromFirebase = async () => {
       try {
         const snapshot = await getDocs(collection(db, 'athletes'));
         const athletes = snapshot.docs.map((docSnap) => hydrateAthlete(docSnap.id, docSnap.data()));
+        if (cancelled) return;
         setAllAthletes(athletes);
         setUploadStatus(`Loaded ${athletes.length} athletes from Firebase.`);
       } catch (error) {
+        if (cancelled) return;
         setUploadStatus(`Failed to load athletes: ${getErrorMessage(error)}`);
       } finally {
+        if (cancelled) return;
         setIsLoadingFirebase(false);
       }
     };
 
     loadAthletesFromFirebase();
-  }, []);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [user]);
 
   // Filter and search rows
   const filteredRows = useMemo(() => {
@@ -304,6 +414,11 @@ function App() {
     const files = Array.from(event.target.files || []);
 
     if (!files.length) return;
+    if (!user) {
+      setUploadStatus('Sign in with your HKIS Google account to upload athlete data.');
+      event.target.value = '';
+      return;
+    }
 
     setIsUploading(true);
     setUploadStatus(
@@ -373,11 +488,18 @@ function App() {
   return (
     <div className="page-shell">
       <main className="tracker-card">
+          <AuthButton user={user} isFirebaseReady={isFirebaseReady} />
           <div className="dragon-badge" aria-hidden="true">
             <span className="dragon-icon">GO DRAGONS</span>
             <span className="dragon-glyph">🐉</span>
           </div>
         <h1>Athlete tracker</h1>
+
+        {!user && (
+          <p className="status-text">
+            Sign in with Google to upload and sync athlete data.
+          </p>
+        )}
 
         <section className="controls-row">
           <div className="search-column">
@@ -431,7 +553,7 @@ function App() {
               onChange={handleFilesUpload}
               disabled={!canUpload}
             />
-            {isUploading ? 'Uploading...' : 'Upload data'}
+            {isUploading ? 'Uploading...' : user ? 'Upload data' : 'Sign in to upload'}
           </label>
         </section>
 
