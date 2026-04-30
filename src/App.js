@@ -786,6 +786,11 @@ function App() {
         </section>
 
         <p className="status-text">{uploadStatus}</p>
+        {deletionStatus && (
+          <p className="status-text" style={{ color: '#bfdbfe' }}>
+            {deletionStatus}
+          </p>
+        )}
 
         <section className="preview-card">
           <div className="preview-header">
