@@ -96,6 +96,12 @@ const getFieldValue = (row, headerCandidates) => {
   return '';
 };
 
+const normalizeTeamLabel = (value = '') =>
+  `${value}`
+    .replace(/\s+\d{4}\/\d{1,4}\s*$/u, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
 const isHeaderRow = (row = []) => {
   const normalizedCells = row.map((cell) => normalizeHeader(cell)).filter(Boolean);
 
@@ -134,7 +140,7 @@ const buildRowFromHeaders = (headers = [], row = [], fallbackTeam = '') => {
       headerId.startsWith('squad') ||
       headerId.startsWith('club')
     ) {
-      normalizedRow.group = value;
+      normalizedRow.group = normalizeTeamLabel(value);
       return;
     }
 
@@ -147,7 +153,7 @@ const buildRowFromHeaders = (headers = [], row = [], fallbackTeam = '') => {
   });
 
   if (fallbackTeam && !normalizedRow.group && !normalizedRow.team && !normalizedRow.squad) {
-    normalizedRow.group = fallbackTeam;
+    normalizedRow.group = normalizeTeamLabel(fallbackTeam);
   }
 
   if (Object.keys(extraFields).length > 0) {
