@@ -7,7 +7,9 @@ import {
   addDoc,
   arrayUnion,
   collection,
+  deleteDoc,
   doc,
+  getDoc,
   getDocs,
   serverTimestamp,
   setDoc,
@@ -183,7 +185,6 @@ const hydrateAthlete = (athleteKey, data) => ({
   email: data.email || '',
   grade: data.grade || '',
   gender: data.gender || '',
-  birthdate: data.birthdate || '',
   teams: Array.isArray(data.teams) ? data.teams : [],
   team: Array.isArray(data.teams) ? data.teams[0] : '',
   sourceFile: Array.isArray(data.sourceFiles) ? data.sourceFiles[0] : '',
@@ -202,7 +203,6 @@ const tableColumns = [
   { id: 'firstName', label: 'First Name' },
   { id: 'lastName', label: 'Last Name' },
   { id: 'email', label: 'Email' },
-  { id: 'birthdate', label: 'Birthdate' },
   { id: 'grade', label: 'Grade' },
   { id: 'team', label: 'Team' },
   { id: 'sourceFile', label: 'Source File' },
@@ -220,7 +220,13 @@ const isAllowedHkisEmail = (email = '') => {
 
 function App() {
   const [allAthletes, setAllAthletes] = useState([]);
+  const [deletedAthletes, setDeletedAthletes] = useState([]);
   const [user, setUser] = useState(null);
+  const [isLoadingDeleted, setIsLoadingDeleted] = useState(false);
+  const [deletionStatus, setDeletionStatus] = useState('');
+  const [selectedAthletes, setSelectedAthletes] = useState(new Set());
+  const [selectedDeleted, setSelectedDeleted] = useState(new Set());
+  const [viewMode, setViewMode] = useState('active');
   const [isLoadingFirebase, setIsLoadingFirebase] = useState(isFirebaseReady);
   const [uploadStatus, setUploadStatus] = useState(
     isFirebaseReady
@@ -231,8 +237,18 @@ function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const [filterTeam, setFilterTeam] = useState('');
   const [filterGrade, setFilterGrade] = useState('');
-  const [filterBirthdate, setFilterBirthdate] = useState('');
   const [visibleColumns, setVisibleColumns] = useState(defaultVisibleColumns);
+  const [sortBy, setSortBy] = useState('lastName');
+  const [sortDir, setSortDir] = useState('asc');
+
+  const handleSort = (columnId) => {
+    if (sortBy === columnId) {
+      setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
+    } else {
+      setSortBy(columnId);
+      setSortDir('asc');
+    }
+  };
 
   const canUpload = !isUploading && !!user;
 
@@ -272,9 +288,8 @@ function App() {
       setAllAthletes([]);
       setIsLoadingFirebase(false);
       setSearchQuery('');
-      setFilterTeam('');
-      setFilterGrade('');
-      setFilterBirthdate('');
+        setFilterTeam('');
+        setFilterGrade('');
       return;
     }
 
@@ -309,9 +324,8 @@ function App() {
   const filteredRows = useMemo(() => {
     const queryTerms = splitCommaTerms(searchQuery);
     const hasSearchTerms = queryTerms.length > 0;
-    const normalizedBirthdateFilter = normalizeSearchValue(filterBirthdate);
 
-    return allAthletes.filter((row) => {
+    const rows = allAthletes.filter((row) => {
       const searchableValues = [
         row.firstName,
         row.lastName,
@@ -328,12 +342,27 @@ function App() {
 
       const matchesTeamFilter = !filterTeam || row.teams.includes(filterTeam);
       const matchesGradeFilter = !filterGrade || normalizeSearchValue(row.grade) === normalizeSearchValue(filterGrade);
-      const matchesBirthdateFilter =
-        !normalizedBirthdateFilter || normalizeSearchValue(row.birthdate).includes(normalizedBirthdateFilter);
 
-      return matchesSearch && matchesTeamFilter && matchesGradeFilter && matchesBirthdateFilter;
+      return matchesSearch && matchesTeamFilter && matchesGradeFilter;
     });
-  }, [allAthletes, searchQuery, filterTeam, filterGrade, filterBirthdate]);
+
+    const compare = (a, b) => {
+      const aVal = `${(a[sortBy] ?? '')}`.toLowerCase();
+      const bVal = `${(b[sortBy] ?? '')}`.toLowerCase();
+      const aNum = parseFloat(aVal.replace(/[^0-9.-]/g, ''));
+      const bNum = parseFloat(bVal.replace(/[^0-9.-]/g, ''));
+      const bothNumeric = !Number.isNaN(aNum) && !Number.isNaN(bNum);
+
+      if (bothNumeric) return aNum - bNum;
+      if (aVal < bVal) return -1;
+      if (aVal > bVal) return 1;
+      return 0;
+    };
+
+    rows.sort((a, b) => (sortDir === 'asc' ? compare(a, b) : -compare(a, b)));
+
+    return rows;
+  }, [allAthletes, searchQuery, filterTeam, filterGrade, sortBy, sortDir]);
 
   // Get all unique teams for filter dropdown
   const uniqueTeams = useMemo(() => {
@@ -388,7 +417,7 @@ function App() {
         gender: row.gender || null,
         email: row.email || null,
         grade: row.grade || null,
-        birthdate: row.birthdate || null,
+        // birthdate intentionally omitted
         sourceFiles: arrayUnion(fileName),
         uploadIds: arrayUnion(uploadRef.id),
         updatedAt: serverTimestamp(),
@@ -453,7 +482,6 @@ function App() {
         setSearchQuery('');
         setFilterTeam('');
         setFilterGrade('');
-        setFilterBirthdate('');
         setUploadStatus(
           `Parsed ${allMappedRows.length} rows from ${files.length} file(s). Configure Firebase .env to enable saving.`
         );
@@ -465,7 +493,6 @@ function App() {
         setSearchQuery('');
         setFilterTeam('');
         setFilterGrade('');
-        setFilterBirthdate('');
         setUploadStatus(
           `Upload complete. Saved ${allMappedRows.length} rows from ${files.length} file(s) to Firebase.`
         );
@@ -483,6 +510,213 @@ function App() {
       ...current,
       [columnId]: !current[columnId],
     }));
+  };
+
+  // Load deleted athletes from trash collection
+  const loadDeletedAthletes = async () => {
+    if (!isFirebaseReady || !user) return;
+
+    try {
+      setIsLoadingDeleted(true);
+      const snapshot = await getDocs(collection(db, 'deletedAthletes'));
+      const deleted = snapshot.docs.map((docSnap) => ({ athleteKey: docSnap.id, ...docSnap.data() }));
+      setDeletedAthletes(deleted);
+    } catch (error) {
+      setDeletionStatus(`Failed to load deleted athletes: ${getErrorMessage(error)}`);
+    } finally {
+      setIsLoadingDeleted(false);
+    }
+  };
+
+  // Move selected athletes to trash
+  const handleDeleteSelected = async () => {
+    if (selectedAthletes.size === 0) {
+      setDeletionStatus('No athletes selected for deletion.');
+      return;
+    }
+
+    if (!isFirebaseReady || !user) return;
+
+    try {
+      setDeletionStatus(`Moving ${selectedAthletes.size} athlete(s) to trash...`);
+
+      const athletesToDelete = allAthletes.filter((a) => selectedAthletes.has(a.athleteKey));
+
+      const deleteOps = athletesToDelete.map(async (athlete) => {
+        const activeRef = doc(db, 'athletes', athlete.athleteKey);
+        const trashedRef = doc(db, 'deletedAthletes', athlete.athleteKey);
+
+        // Read full source document to preserve all fields
+        const srcSnap = await getDoc(activeRef);
+        const srcData = srcSnap && srcSnap.exists() ? srcSnap.data() : null;
+
+        const dataToStore = srcData ? { ...srcData } : { ...athlete };
+        dataToStore.deletedAt = serverTimestamp();
+
+        // Copy full doc to deleted collection
+        await setDoc(trashedRef, dataToStore);
+
+        // Remove from active collection
+        await deleteDoc(activeRef);
+      });
+
+      await Promise.all(deleteOps);
+
+      setAllAthletes((prev) => prev.filter((a) => !selectedAthletes.has(a.athleteKey)));
+      setSelectedAthletes(new Set());
+      setDeletionStatus(`Moved ${athletesToDelete.length} athlete(s) to trash.`);
+    } catch (error) {
+      setDeletionStatus(`Failed to delete athletes: ${getErrorMessage(error)}`);
+    }
+  };
+
+  // Restore athlete from trash
+  const handleRestoreAthlete = async (athlete) => {
+    if (!isFirebaseReady || !user) return;
+
+    try {
+      setDeletionStatus(`Restoring ${athlete.firstName} ${athlete.lastName}...`);
+
+      const activeRef = doc(db, 'athletes', athlete.athleteKey);
+      const trashedRef = doc(db, 'deletedAthletes', athlete.athleteKey);
+
+      // Read full trashed document (in case UI passed a hydrated/partial object)
+      const trashedSnap = await getDoc(trashedRef);
+      const trashedData = trashedSnap && trashedSnap.exists() ? trashedSnap.data() : athlete;
+
+      const { deletedAt, ...athleteData } = trashedData;
+      await setDoc(activeRef, athleteData);
+
+      // Remove from deleted collection
+      await deleteDoc(trashedRef);
+
+      setDeletedAthletes((prev) => prev.filter((a) => a.athleteKey !== athlete.athleteKey));
+      setAllAthletes((prev) => [...prev, hydrateAthlete(athlete.athleteKey, athleteData)]);
+      setDeletionStatus(`Restored ${athlete.firstName} ${athlete.lastName}.`);
+    } catch (error) {
+      setDeletionStatus(`Failed to restore athlete: ${getErrorMessage(error)}`);
+    }
+  };
+
+  // Permanently delete from trash
+  const handlePermanentlyDelete = async (athlete) => {
+    if (!isFirebaseReady || !user) return;
+
+    const confirmed = window.confirm(
+      `Permanently delete ${athlete.firstName} ${athlete.lastName}? This cannot be undone.`
+    );
+
+    if (!confirmed) return;
+
+    try {
+      setDeletionStatus(`Permanently deleting ${athlete.firstName} ${athlete.lastName}...`);
+
+      const trashedRef = doc(db, 'deletedAthletes', athlete.athleteKey);
+      await deleteDoc(trashedRef);
+
+      setDeletedAthletes((prev) => prev.filter((a) => a.athleteKey !== athlete.athleteKey));
+      setDeletionStatus(`Permanently deleted ${athlete.firstName} ${athlete.lastName}.`);
+    } catch (error) {
+      setDeletionStatus(`Failed to permanently delete athlete: ${getErrorMessage(error)}`);
+    }
+  };
+
+  const handleSelectAthlete = (athleteKey) => {
+    setSelectedAthletes((prev) => {
+      const updated = new Set(prev);
+      if (updated.has(athleteKey)) {
+        updated.delete(athleteKey);
+      } else {
+        updated.add(athleteKey);
+      }
+      return updated;
+    });
+  };
+
+  const handleSelectAll = (rowsToSelect) => {
+    if (selectedAthletes.size === rowsToSelect.length) {
+      setSelectedAthletes(new Set());
+    } else {
+      setSelectedAthletes(new Set(rowsToSelect.map((row) => row.athleteKey)));
+    }
+  };
+
+  // Deleted (trash) selection handlers
+  const handleSelectDeletedAthlete = (athleteKey) => {
+    setSelectedDeleted((prev) => {
+      const updated = new Set(prev);
+      if (updated.has(athleteKey)) {
+        updated.delete(athleteKey);
+      } else {
+        updated.add(athleteKey);
+      }
+      return updated;
+    });
+  };
+
+  const handleSelectAllDeleted = (rowsToSelect) => {
+    if (selectedDeleted.size === rowsToSelect.length) {
+      setSelectedDeleted(new Set());
+    } else {
+      setSelectedDeleted(new Set(rowsToSelect.map((row) => row.athleteKey)));
+    }
+  };
+
+  const handleRestoreSelected = async () => {
+    if (selectedDeleted.size === 0) {
+      setDeletionStatus('No deleted athletes selected.');
+      return;
+    }
+
+    try {
+      setDeletionStatus(`Restoring ${selectedDeleted.size} athlete(s)...`);
+      const toRestore = deletedAthletes.filter((a) => selectedDeleted.has(a.athleteKey));
+
+      const ops = toRestore.map(async (athlete) => {
+        const activeRef = doc(db, 'athletes', athlete.athleteKey);
+        const trashedRef = doc(db, 'deletedAthletes', athlete.athleteKey);
+        const trashedSnap = await getDoc(trashedRef);
+        const trashedData = trashedSnap && trashedSnap.exists() ? trashedSnap.data() : athlete;
+        const { deletedAt, ...athleteData } = trashedData;
+        await setDoc(activeRef, athleteData);
+        await deleteDoc(trashedRef);
+      });
+
+      await Promise.all(ops);
+      setAllAthletes((prev) => [...prev, ...toRestore.map((a) => hydrateAthlete(a.athleteKey, a))]);
+      setDeletedAthletes((prev) => prev.filter((a) => !selectedDeleted.has(a.athleteKey)));
+      setSelectedDeleted(new Set());
+      setDeletionStatus(`Restored ${toRestore.length} athlete(s).`);
+    } catch (error) {
+      setDeletionStatus(`Failed to restore selected athletes: ${getErrorMessage(error)}`);
+    }
+  };
+
+  const handleDeleteSelectedPermanently = async () => {
+    if (selectedDeleted.size === 0) {
+      setDeletionStatus('No deleted athletes selected.');
+      return;
+    }
+
+    const confirmed = window.confirm(`Permanently delete ${selectedDeleted.size} athlete(s)? This cannot be undone.`);
+    if (!confirmed) return;
+
+    try {
+      setDeletionStatus(`Permanently deleting ${selectedDeleted.size} athlete(s)...`);
+      const toDelete = deletedAthletes.filter((a) => selectedDeleted.has(a.athleteKey));
+
+      const ops = toDelete.map(async (athlete) => {
+        const trashedRef = doc(db, 'deletedAthletes', athlete.athleteKey);
+        await deleteDoc(trashedRef);
+      });
+
+      await Promise.all(ops);
+      setDeletedAthletes((prev) => prev.filter((a) => !selectedDeleted.has(a.athleteKey)));
+      setSelectedDeleted(new Set());
+      setDeletionStatus(`Permanently deleted ${toDelete.length} athlete(s).`);
+    } catch (error) {
+      setDeletionStatus(`Failed to permanently delete selected athletes: ${getErrorMessage(error)}`);
+    }
   };
 
   return (
@@ -535,13 +769,7 @@ function App() {
                   </option>
                 ))}
               </select>
-              <input
-                type="text"
-                className="birthdate-input"
-                placeholder="Search birthdate"
-                value={filterBirthdate}
-                onChange={(e) => setFilterBirthdate(e.target.value)}
-              />
+              
             </div>
           </div>
 
@@ -561,12 +789,36 @@ function App() {
 
         <section className="preview-card">
           <div className="preview-header">
-            <h2>Spreadsheet preview</h2>
-            <div className="preview-meta">
-              <span>Rows: {displaySummary.rowCount}</span>
-              <span>Athletes: {displaySummary.athleteCount}</span>
-              <span>Teams: {displaySummary.teamCount}</span>
+            <div>
+              <h2>{viewMode === 'active' ? 'Athlete Data' : 'Deleted Athletes'}</h2>
+              <div className="view-tabs">
+                <button
+                  className={`view-tab ${viewMode === 'active' ? 'active' : ''}`}
+                  onClick={() => {
+                    setViewMode('active');
+                    setSelectedAthletes(new Set());
+                  }}
+                >
+                  Active ({allAthletes.length})
+                </button>
+                <button
+                  className={`view-tab ${viewMode === 'deleted' ? 'active' : ''}`}
+                  onClick={() => {
+                    setViewMode('deleted');
+                    loadDeletedAthletes();
+                  }}
+                >
+                  Trash ({deletedAthletes.length})
+                </button>
+              </div>
             </div>
+            {viewMode === 'active' && (
+              <div className="preview-meta">
+                <span>Rows: {displaySummary.rowCount}</span>
+                <span>Athletes: {displaySummary.athleteCount}</span>
+                <span>Teams: {displaySummary.teamCount}</span>
+              </div>
+            )}
           </div>
 
           <div className="column-visibility-row">
@@ -585,34 +837,139 @@ function App() {
             </div>
           </div>
 
-          {filteredRows.length === 0 ? (
-            <p className="empty-state">
-              {isLoadingFirebase
-                ? 'Loading athletes...'
-                : allAthletes.length === 0
-                  ? 'Upload one or more spreadsheet files to preview parsed data.'
-                : 'No athletes match your search or filter.'}
-            </p>
-          ) : (
-            <div className="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    {renderedColumns.map((column) => (
-                      <th key={column.id}>{column.label}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {filteredRows.slice(0, 120).map((row, index) => (
-                    <tr key={`${row.athleteKey}-${row.team}-${index}`}>
-                      {renderedColumns.map((column) => (
-                        <td key={`${row.athleteKey}-${column.id}`}>{row[column.id]}</td>
+          {viewMode === 'active' ? (
+            <>
+              {selectedAthletes.size > 0 && (
+                <div className="selection-controls">
+                  <span className="selection-count">{selectedAthletes.size} athlete(s) selected</span>
+                  <button className="delete-button" onClick={handleDeleteSelected}>
+                    Delete Selected
+                  </button>
+                </div>
+              )}
+
+              {filteredRows.length === 0 ? (
+                <p className="empty-state">
+                  {isLoadingFirebase
+                    ? 'Loading athletes...'
+                    : allAthletes.length === 0
+                      ? 'Upload one or more spreadsheet files to preview parsed data.'
+                    : 'No athletes match your search or filter.'}
+                </p>
+              ) : (
+                <div className="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th className="checkbox-column">
+                          <input
+                            type="checkbox"
+                            checked={selectedAthletes.size === filteredRows.length && filteredRows.length > 0}
+                            onChange={() => handleSelectAll(filteredRows)}
+                            title="Select all"
+                          />
+                        </th>
+                        {renderedColumns.map((column) => (
+                          <th key={column.id} className="sortable" onClick={() => handleSort(column.id)}>
+                            {column.label} {sortBy === column.id ? (sortDir === 'asc' ? '▲' : '▼') : '↕'}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filteredRows.slice(0, 120).map((row, index) => (
+                        <tr key={`${row.athleteKey}-${row.team}-${index}`}>
+                          <td className="checkbox-column">
+                            <input
+                              type="checkbox"
+                              checked={selectedAthletes.has(row.athleteKey)}
+                              onChange={() => handleSelectAthlete(row.athleteKey)}
+                            />
+                          </td>
+                          {renderedColumns.map((column) => (
+                            <td key={`${row.athleteKey}-${column.id}`}>{row[column.id]}</td>
+                          ))}
+                        </tr>
                       ))}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </>
+          ) : (
+            <div>
+              {isLoadingDeleted ? (
+                <p className="empty-state">Loading deleted athletes...</p>
+              ) : deletedAthletes.length === 0 ? (
+                <p className="empty-state">No deleted athletes.</p>
+              ) : (
+                <>
+                  {selectedDeleted.size > 0 && (
+                    <div className="selection-controls">
+                      <span className="selection-count">{selectedDeleted.size} deleted athlete(s) selected</span>
+                      <div style={{ display: 'flex', gap: 8 }}>
+                        <button className="action-button restore-button" onClick={handleRestoreSelected}>
+                          Restore Selected
+                        </button>
+                        <button className="delete-button" onClick={handleDeleteSelectedPermanently}>
+                          Delete Selected Permanently
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="table-wrap">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th className="checkbox-column">
+                            <input
+                              type="checkbox"
+                              checked={selectedDeleted.size === deletedAthletes.length && deletedAthletes.length > 0}
+                              onChange={() => handleSelectAllDeleted(deletedAthletes)}
+                              title="Select all deleted"
+                            />
+                          </th>
+                          <th>Name</th>
+                          <th>Student Number</th>
+                          <th>Email</th>
+                          <th>Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {deletedAthletes.map((athlete) => (
+                          <tr key={athlete.athleteKey}>
+                            <td className="checkbox-column">
+                              <input
+                                type="checkbox"
+                                checked={selectedDeleted.has(athlete.athleteKey)}
+                                onChange={() => handleSelectDeletedAthlete(athlete.athleteKey)}
+                              />
+                            </td>
+                            <td>{athlete.firstName} {athlete.lastName}</td>
+                            <td>{athlete.studentNumber}</td>
+                            <td>{athlete.email}</td>
+                            <td>
+                              <button
+                                className="action-button restore-button"
+                                onClick={() => handleRestoreAthlete(athlete)}
+                              >
+                                Restore
+                              </button>
+                              <button
+                                className="action-button delete-button"
+                                onClick={() => handlePermanentlyDelete(athlete)}
+                              >
+                                Delete Permanently
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
+              )}
             </div>
           )}
         </section>
