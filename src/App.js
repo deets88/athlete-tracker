@@ -64,19 +64,26 @@ const parseCsvText = (text = '') => {
 
   const headers = parseLine(lines[0]);
 
-  return lines.slice(1).map((line) => {
-    const values = parseLine(line);
-
-    return headers.reduce((row, header, index) => {
-      if (header) {
-        row[header] = values[index] ?? '';
-      }
-      return row;
-    }, {});
-  });
+  return [headers, ...lines.slice(1).map((line) => parseLine(line))];
 };
 
-const getValue = (row, headerCandidates) => {
+const getCellValue = (value = '') => `${value ?? ''}`.trim();
+
+const spreadsheetFieldAliases = {
+  team: ['group', 'team', 'squad', 'club'],
+  firstName: ['studentfirstname', 'firstname', 'first'],
+  lastName: ['studentlastname', 'lastname', 'last'],
+  otherName: ['studentothername', 'middlename', 'othername', 'preferredname', 'nickname'],
+  gender: ['gender', 'sex'],
+  email: ['studentemailaddress', 'email', 'studentemail', 'emailaddress'],
+  grade: ['yeargrade', 'grade', 'year', 'yearlevel'],
+  birthdate: ['birthdate', 'dateofbirth', 'dob', 'studentbirthdate'],
+  studentNumber: ['studentnumber', 'studentid', 'studentno', 'idnumber'],
+};
+
+const knownSpreadsheetHeaders = new Set(Object.values(spreadsheetFieldAliases).flat());
+
+const getFieldValue = (row, headerCandidates) => {
   const rowEntries = Object.entries(row || {});
 
   for (const [header, value] of rowEntries) {
@@ -89,8 +96,70 @@ const getValue = (row, headerCandidates) => {
   return '';
 };
 
+const isHeaderRow = (row = []) => {
+  const normalizedCells = row.map((cell) => normalizeHeader(cell)).filter(Boolean);
+
+  if (normalizedCells.length < 2) {
+    return false;
+  }
+
+  const matches = normalizedCells.filter((cell) => knownSpreadsheetHeaders.has(cell)).length;
+  return matches >= 2;
+};
+
+const buildRowFromHeaders = (headers = [], row = [], fallbackTeam = '') => {
+  const normalizedRow = {};
+  const extraFields = {};
+  const extraFieldLabels = {};
+
+  headers.forEach((header, index) => {
+    const headerLabel = getCellValue(header);
+    const headerId = normalizeHeader(headerLabel);
+
+    if (!headerId) {
+      return;
+    }
+
+    const value = getCellValue(row[index]);
+
+    if (!value) {
+      return;
+    }
+
+    if (
+      headerId === 'group' ||
+      headerId.startsWith('group') ||
+      headerId === 'team' ||
+      headerId.startsWith('team') ||
+      headerId.startsWith('squad') ||
+      headerId.startsWith('club')
+    ) {
+      normalizedRow.group = value;
+      return;
+    }
+
+    normalizedRow[headerId] = value;
+
+    if (!knownSpreadsheetHeaders.has(headerId)) {
+      extraFields[headerId] = value;
+      extraFieldLabels[headerId] = headerLabel;
+    }
+  });
+
+  if (fallbackTeam && !normalizedRow.group && !normalizedRow.team && !normalizedRow.squad) {
+    normalizedRow.group = fallbackTeam;
+  }
+
+  if (Object.keys(extraFields).length > 0) {
+    normalizedRow.extraFields = extraFields;
+    normalizedRow.extraFieldLabels = extraFieldLabels;
+  }
+
+  return normalizedRow;
+};
+
 const extractStudentNumber = ({ row, email }) => {
-  const directValue = getValue(row, [
+  const directValue = getFieldValue(row, [
     'studentnumber',
     'studentid',
     'studentno',
@@ -116,18 +185,21 @@ const createAthleteKey = ({ studentNumber, firstName, lastName, email }) => {
 };
 
 const mapRosterRow = (row, sourceFile) => {
-  const team = getValue(row, ['group', 'team', 'squad']);
-  const firstName = getValue(row, ['studentfirstname', 'firstname', 'first']);
-  const lastName = getValue(row, ['studentlastname', 'lastname', 'last']);
-  const otherName = getValue(row, ['studentothername', 'middlename', 'othername']);
-  const gender = getValue(row, ['gender', 'sex']);
-  const email = getValue(row, ['studentemailaddress', 'email', 'studentemail']);
-  const grade = getValue(row, ['yeargrade', 'grade', 'year']);
-  const birthdate = getValue(row, ['birthdate', 'dateofbirth', 'dob', 'studentbirthdate']);
+  const team = getFieldValue(row, spreadsheetFieldAliases.team);
+  const firstName = getFieldValue(row, spreadsheetFieldAliases.firstName);
+  const lastName = getFieldValue(row, spreadsheetFieldAliases.lastName);
+  const otherName = getFieldValue(row, spreadsheetFieldAliases.otherName);
+  const gender = getFieldValue(row, spreadsheetFieldAliases.gender);
+  const email = getFieldValue(row, spreadsheetFieldAliases.email);
+  const grade = getFieldValue(row, spreadsheetFieldAliases.grade);
+  const birthdate = getFieldValue(row, spreadsheetFieldAliases.birthdate);
   const studentNumber = extractStudentNumber({ row, email });
+  const extraFields = row.extraFields && typeof row.extraFields === 'object' ? row.extraFields : {};
+  const extraFieldLabels =
+    row.extraFieldLabels && typeof row.extraFieldLabels === 'object' ? row.extraFieldLabels : {};
 
   const hasUsefulData =
-    !!team || !!firstName || !!lastName || !!email || !!studentNumber;
+    !!firstName || !!lastName || !!email || !!studentNumber || Object.keys(extraFields).length > 0;
 
   if (!hasUsefulData) {
     return null;
@@ -143,10 +215,48 @@ const mapRosterRow = (row, sourceFile) => {
     grade,
     birthdate,
     studentNumber,
+    extraFields,
+    extraFieldLabels,
     athleteKey: createAthleteKey({ studentNumber, firstName, lastName, email }),
     sourceFile,
   };
 };
+const mapSpreadsheetRows = (rows, sourceFile) => {
+  const mappedRows = [];
+  let activeHeaders = [];
+  let fallbackTeam = '';
+
+  rows.forEach((row) => {
+    const rowValues = Array.isArray(row) ? row.map((cell) => getCellValue(cell)) : [];
+    const nonEmptyValues = rowValues.filter(Boolean);
+
+    if (!nonEmptyValues.length) {
+      return;
+    }
+
+    if (isHeaderRow(rowValues)) {
+      activeHeaders = rowValues;
+      return;
+    }
+
+    if (!activeHeaders.length) {
+      if (nonEmptyValues.length === 1) {
+        fallbackTeam = nonEmptyValues[0];
+      }
+      return;
+    }
+
+    const rowData = buildRowFromHeaders(activeHeaders, rowValues, fallbackTeam);
+    const mappedRow = mapRosterRow(rowData, sourceFile);
+
+    if (mappedRow) {
+      mappedRows.push(mappedRow);
+    }
+  });
+
+  return mappedRows;
+};
+
 
 const parseSpreadsheetFile = async (file) => {
   const lowerName = (file.name || '').toLowerCase();
@@ -154,20 +264,27 @@ const parseSpreadsheetFile = async (file) => {
 
   if (!isExcelFile) {
     const text = await file.text();
-    return parseCsvText(text);
+    return mapSpreadsheetRows(parseCsvText(text), file.name);
   }
 
   const buffer = await file.arrayBuffer();
   const workbook = XLSX.read(buffer, { type: 'array' });
-  const firstSheetName = workbook.SheetNames[0];
 
-  if (!firstSheetName) {
+  if (!workbook.SheetNames.length) {
     return [];
   }
 
-  return XLSX.utils.sheet_to_json(workbook.Sheets[firstSheetName], {
-    defval: '',
+  const rows = workbook.SheetNames.flatMap((sheetName) => {
+    const sheetRows = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], {
+      header: 1,
+      defval: '',
+      blankrows: false,
+    });
+
+    return [...sheetRows, []];
   });
+
+  return mapSpreadsheetRows(rows, file.name);
 };
 
 const getErrorMessage = (error) => {
@@ -187,6 +304,9 @@ const hydrateAthlete = (athleteKey, data) => ({
   gender: data.gender || '',
   teams: Array.isArray(data.teams) ? data.teams : [],
   team: Array.isArray(data.teams) ? data.teams[0] : '',
+  extraFields: data.extraFields && typeof data.extraFields === 'object' ? data.extraFields : {},
+  extraFieldLabels:
+    data.extraFieldLabels && typeof data.extraFieldLabels === 'object' ? data.extraFieldLabels : {},
   sourceFile: Array.isArray(data.sourceFiles) ? data.sourceFiles[0] : '',
 });
 
@@ -198,7 +318,7 @@ const splitCommaTerms = (value = '') =>
     .map((term) => normalizeSearchValue(term))
     .filter(Boolean);
 
-const tableColumns = [
+const standardColumns = [
   { id: 'studentNumber', label: 'Student Number' },
   { id: 'firstName', label: 'First Name' },
   { id: 'lastName', label: 'Last Name' },
@@ -208,10 +328,37 @@ const tableColumns = [
   { id: 'sourceFile', label: 'Source File' },
 ];
 
-const defaultVisibleColumns = tableColumns.reduce((acc, column) => {
+const defaultVisibleColumns = standardColumns.reduce((acc, column) => {
   acc[column.id] = true;
   return acc;
 }, {});
+
+const formatColumnLabel = (value = '') =>
+  `${value}`
+    .trim()
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+
+const getRowColumnValue = (row, columnId) => {
+  if (!row) return '';
+
+  if (columnId === 'team') {
+    return row.team || (Array.isArray(row.teams) ? row.teams[0] : '') || '';
+  }
+
+  if (Object.prototype.hasOwnProperty.call(row, columnId) && row[columnId] != null) {
+    return row[columnId];
+  }
+
+  if (row.extraFields && Object.prototype.hasOwnProperty.call(row.extraFields, columnId)) {
+    return row.extraFields[columnId];
+  }
+
+  return '';
+};
 
 const isAllowedHkisEmail = (email = '') => {
   const [, domain = ''] = `${email}`.toLowerCase().split('@');
@@ -331,6 +478,8 @@ function App() {
         row.lastName,
         row.studentNumber,
         row.email,
+        row.team,
+        ...(Object.values(row.extraFields || {})),
         `${row.firstName || ''} ${row.lastName || ''}`,
       ]
         .map((value) => normalizeSearchValue(value))
@@ -340,15 +489,16 @@ function App() {
         !hasSearchTerms ||
         queryTerms.some((term) => searchableValues.some((value) => value.includes(term)));
 
-      const matchesTeamFilter = !filterTeam || row.teams.includes(filterTeam);
+      const matchesTeamFilter =
+        !filterTeam || (Array.isArray(row.teams) && row.teams.includes(filterTeam)) || row.team === filterTeam;
       const matchesGradeFilter = !filterGrade || normalizeSearchValue(row.grade) === normalizeSearchValue(filterGrade);
 
       return matchesSearch && matchesTeamFilter && matchesGradeFilter;
     });
 
     const compare = (a, b) => {
-      const aVal = `${(a[sortBy] ?? '')}`.toLowerCase();
-      const bVal = `${(b[sortBy] ?? '')}`.toLowerCase();
+      const aVal = `${getRowColumnValue(a, sortBy) ?? ''}`.toLowerCase();
+      const bVal = `${getRowColumnValue(b, sortBy) ?? ''}`.toLowerCase();
       const aNum = parseFloat(aVal.replace(/[^0-9.-]/g, ''));
       const bNum = parseFloat(bVal.replace(/[^0-9.-]/g, ''));
       const bothNumeric = !Number.isNaN(aNum) && !Number.isNaN(bNum);
@@ -394,10 +544,48 @@ function App() {
     };
   }, [filteredRows]);
 
+  const extraColumns = useMemo(() => {
+    const columnsById = new Map();
+
+    allAthletes.forEach((athlete) => {
+      const labels = athlete.extraFieldLabels || {};
+      Object.keys(athlete.extraFields || {}).forEach((fieldId) => {
+        if (!columnsById.has(fieldId)) {
+          columnsById.set(fieldId, {
+            id: fieldId,
+            label: labels[fieldId] || formatColumnLabel(fieldId),
+          });
+        }
+      });
+    });
+
+    return Array.from(columnsById.values()).sort((a, b) => a.label.localeCompare(b.label));
+  }, [allAthletes]);
+
+  const allColumns = useMemo(() => [...standardColumns, ...extraColumns], [extraColumns]);
+
   const renderedColumns = useMemo(
-    () => tableColumns.filter((column) => visibleColumns[column.id]),
-    [visibleColumns]
+    () => allColumns.filter((column) => visibleColumns[column.id]),
+    [allColumns, visibleColumns]
   );
+
+  useEffect(() => {
+    if (!extraColumns.length) return;
+
+    setVisibleColumns((current) => {
+      let changed = false;
+      const next = { ...current };
+
+      extraColumns.forEach((column) => {
+        if (!(column.id in next)) {
+          next[column.id] = true;
+          changed = true;
+        }
+      });
+
+      return changed ? next : current;
+    });
+  }, [extraColumns]);
 
   const persistRowsToFirebase = async (mappedRows, fileName) => {
     const uploadRef = await addDoc(collection(db, 'uploads'), {
@@ -418,6 +606,8 @@ function App() {
         email: row.email || null,
         grade: row.grade || null,
         // birthdate intentionally omitted
+        extraFields: row.extraFields || {},
+        extraFieldLabels: row.extraFieldLabels || {},
         sourceFiles: arrayUnion(fileName),
         uploadIds: arrayUnion(uploadRef.id),
         updatedAt: serverTimestamp(),
@@ -458,11 +648,7 @@ function App() {
 
     try {
       for (const file of files) {
-        const rows = await parseSpreadsheetFile(file);
-
-        const mappedRows = rows
-          .map((row) => mapRosterRow(row, file.name))
-          .filter(Boolean);
+        const mappedRows = await parseSpreadsheetFile(file);
 
         if (!mappedRows.length) {
           continue;
@@ -829,7 +1015,7 @@ function App() {
           <div className="column-visibility-row">
             <span className="column-visibility-label">Show columns:</span>
             <div className="column-visibility-options">
-              {tableColumns.map((column) => (
+              {allColumns.map((column) => (
                 <label key={column.id} className="column-toggle">
                   <input
                     type="checkbox"
@@ -892,7 +1078,7 @@ function App() {
                             />
                           </td>
                           {renderedColumns.map((column) => (
-                            <td key={`${row.athleteKey}-${column.id}`}>{row[column.id]}</td>
+                            <td key={`${row.athleteKey}-${column.id}`}>{getRowColumnValue(row, column.id)}</td>
                           ))}
                         </tr>
                       ))}
