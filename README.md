@@ -2,6 +2,12 @@
 
 Athlete Tracker is a web app made for coaches and coordinators to keep all student athlete information in one place. You can upload your own CSV spreadsheets or view/edit data already on the site. Add, sort, filter, search, and edit athlete information—no tech skills needed!
 
+## Note for any students who want to improve our app
+
+- Future ideas could include making a calendar that displays schedules (based on athlete's team) to check for overlaps
+- Discuss with HS office about possible integration with HS band/strings
+- Communicate with Ms. Clark
+
 ## 🚀 Get Started
 
 1. **Go to [athlete-tracker-ten.vercel.app](https://athlete-tracker-ten.vercel.app)**
