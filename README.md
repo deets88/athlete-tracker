@@ -23,9 +23,8 @@ Athlete Tracker is a web app made for coaches and coordinators to keep all stude
 - *Example:*
 
     ```
-    Group, Varsity Girls Rugby,,,,,Student Last Name,Student First Name,Student Other Name,Gender,Student Email Address,Year/Grade,,,,,,,,,,,,,,
-    HS - Season 1 - Girls Varsity Rugby Team 2025/26,,,,,El Asmar,Lea,,F,270134@hkis.edu.hk,11,,,,,,,,,,,,,,
-    ...
+    Group, Varsity Girls Rugby, Student Last Name, Student First Name, Student Other Name, Gender, Student Email Address, Year/Grade
+    HS - Season 1 - Girls Varsity Rugby Team 2025/26, Doe ,Jane, F, 260123@hkis.edu.hk, 12
     ```
 
 ## 🏆 Top Features
